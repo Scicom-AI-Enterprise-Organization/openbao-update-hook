@@ -84,6 +84,10 @@ spec:
       labels: { app: audit-resync }
     spec:
       serviceAccountName: audit-resync
+      # CCE-managed pull secret for SWR (the cluster convention; already present
+      # in every namespace). Required — the registry is private (anon pull = 401).
+      imagePullSecrets:
+        - name: swr-pull-secret
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -92,8 +96,8 @@ spec:
         - name: audit-resync
           # Built + pushed to SWR by .github/workflows/docker-build.yml.
           # CCE pulls from same-account SWR without an imagePullSecret.
-          image: swr.my-kualalumpur-1.alphaedge.tmone.com.my/ucc-devl/openbao-hook:v0.1.0
-          imagePullPolicy: IfNotPresent
+          image: swr.my-kualalumpur-1.alphaedge.tmone.com.my/ucc-devl/openbao-hook:latest
+          imagePullPolicy: Always # latest is a moving tag
           ports: [{ containerPort: 9000, name: http }]
           env:
             - { name: LISTEN_ADDR, value: ":9000" }
