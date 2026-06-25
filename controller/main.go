@@ -120,7 +120,9 @@ func relevantKey(e *auditEvent) (string, bool) {
 		return "", false
 	}
 	op := e.Request.Operation
-	if op != "create" && op != "update" {
+	// KV v2 writes log as create (new), update (full put), or patch (partial edit
+	// via the UI or `bao kv patch`). All change the secret, so all must trigger.
+	if op != "create" && op != "update" && op != "patch" {
 		return "", false
 	}
 	if e.Request.MountType != "kv" {
