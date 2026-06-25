@@ -1,0 +1,8 @@
+# CI image: packages a binary already compiled on the runner (see the workflow).
+# FROM scratch => no base layer is pulled (avoids Docker Hub entirely). The
+# controller needs no system CA bundle: it pins the k8s ServiceAccount CA, and
+# the healthcheck is plain localhost HTTP.
+FROM scratch
+COPY audit-resync /audit-resync
+EXPOSE 9000
+ENTRYPOINT ["/audit-resync"]

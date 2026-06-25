@@ -1,6 +1,14 @@
 name: build-image
 
-# Build the audit-resync controller image and push it to GHCR.
+# Native amd64 build, no QEMU, no Docker Hub pulls.
+# Compile with setup-go (Go from go.dev), package FROM scratch, push to GHCR.
+#
+# Cross-arch later? Don't use QEMU (slow). Use a matrix of NATIVE runners, e.g.
+#   strategy: { matrix: { include: [
+#     { arch: amd64, runner: ubuntu-latest },
+#     { arch: arm64, runner: ubuntu-24.04-arm } ] } }
+# build per-arch tags on each native runner, then a final job that stitches them
+# into a manifest list with `docker buildx imagetools create`.
 on:
   push:
     branches: [main]
@@ -9,50 +17,34 @@ on:
       - ".github/workflows/docker-build.yml"
   workflow_dispatch: {}
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }} # scicom-ai-enterprise-organization/openbao-update-hook
-
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # native amd64
     permissions:
       contents: read
       packages: write # push to GHCR
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: false # no external deps, nothing to cache
+
+      - name: Build static binary (native amd64)
+        working-directory: controller
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o audit-resync .
+
       - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-      - name: Image metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,format=long
-            type=ref,event=branch
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: ./controller
-          file: ./controller/Dockerfile
-          platforms: linux/amd64,linux/arm64 # covers x86 and Graviton nodes
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Build & push image (FROM scratch — no Docker Hub)
+        working-directory: controller
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"   # GHCR requires lowercase
+          SHA="sha-${GITHUB_SHA::12}"
+          docker build -f Dockerfile.ci -t "$IMAGE:latest" -t "$IMAGE:$SHA" .
+          docker push "$IMAGE:latest"
+          docker push "$IMAGE:$SHA"
+          echo "pushed $IMAGE:latest and $IMAGE:$SHA"
