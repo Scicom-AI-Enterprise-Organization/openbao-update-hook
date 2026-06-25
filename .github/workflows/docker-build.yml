@@ -3,6 +3,10 @@ name: build-image
 # Native amd64 build, no QEMU, no Docker Hub pulls.
 # Compile with setup-go (Go from go.dev), package FROM scratch, push to GHCR.
 #
+# Tagging:
+#   push to main      -> :edge, :sha-<commit>
+#   push tag vX.Y.Z   -> :vX.Y.Z, :latest, :sha-<commit>  + a GitHub Release
+#
 # Cross-arch later? Don't use QEMU (slow). Use a matrix of NATIVE runners, e.g.
 #   strategy: { matrix: { include: [
 #     { arch: amd64, runner: ubuntu-latest },
@@ -12,16 +16,14 @@ name: build-image
 on:
   push:
     branches: [main]
-    paths:
-      - "controller/**"
-      - ".github/workflows/docker-build.yml"
+    tags: ["v*.*.*"]
   workflow_dispatch: {}
 
 jobs:
   build:
     runs-on: ubuntu-latest # native amd64
     permissions:
-      contents: read
+      contents: write # create the GitHub Release on tags
       packages: write # push to GHCR
     steps:
       - uses: actions/checkout@v4
@@ -43,8 +45,22 @@ jobs:
         run: |
           set -euo pipefail
           IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"   # GHCR requires lowercase
-          SHA="sha-${GITHUB_SHA::12}"
-          docker build -f Dockerfile.ci -t "$IMAGE:latest" -t "$IMAGE:$SHA" .
-          docker push "$IMAGE:latest"
-          docker push "$IMAGE:$SHA"
-          echo "pushed $IMAGE:latest and $IMAGE:$SHA"
+          TAGS=("$IMAGE:sha-${GITHUB_SHA::12}")
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            TAGS+=("$IMAGE:${GITHUB_REF_NAME}" "$IMAGE:latest")
+          else
+            TAGS+=("$IMAGE:edge")
+          fi
+          args=(); for t in "${TAGS[@]}"; do args+=(-t "$t"); done
+          docker build -f Dockerfile.ci "${args[@]}" .
+          for t in "${TAGS[@]}"; do docker push "$t"; done
+          echo "pushed: ${TAGS[*]}"
+
+      - name: Cut GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
