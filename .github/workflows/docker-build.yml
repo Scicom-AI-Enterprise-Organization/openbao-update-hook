@@ -1,36 +1,30 @@
 name: build-image
 
-# Native amd64 build, no QEMU, no Docker Hub pulls.
-# Compile with setup-go (Go from go.dev), package FROM scratch, push to ECR.
-# Auth to AWS is keyless via GitHub OIDC assuming the ECR push role.
+# Native amd64 build, no QEMU, no Docker Hub pulls. Compile with setup-go,
+# package FROM scratch (plain docker build = daemon BuildKit, no image pulls),
+# then push to Huawei SWR with skopeo.
+#
+# SWR rejects OCI image manifests, so `skopeo copy --format v2s2` re-encodes the
+# manifest as Docker v2 schema 2 on push (mirrors the agentic-repos SWR jobs).
+# Auth is username/password (SWR robot account) via repo secrets.
 #
 # Tagging:
 #   push to main      -> :edge, :sha-<commit>
 #   push tag vX.Y.Z   -> :vX.Y.Z, :latest, :sha-<commit>  + a GitHub Release
 #
-# Cross-arch later? Don't use QEMU (slow). Use a matrix of NATIVE runners, e.g.
-#   strategy: { matrix: { include: [
-#     { arch: amd64, runner: ubuntu-latest },
-#     { arch: arm64, runner: ubuntu-24.04-arm } ] } }
-# build per-arch tags on each native runner, then a final job that stitches them
-# into a manifest list with `docker buildx imagetools create`.
+# Cross-arch later? Don't use QEMU (slow). Use a matrix of NATIVE runners and
+# stitch a manifest list — never emulation.
 on:
   push:
     branches: [main]
     tags: ["v*.*.*"]
   workflow_dispatch: {}
 
-env:
-  AWS_REGION: ap-southeast-5
-  ECR_REPO: 865626945255.dkr.ecr.ap-southeast-5.amazonaws.com/scicom/openbao-hook
-  ROLE_ARN: arn:aws:iam::865626945255:role/Scicom-openbao-hook-ECRAccessRole
-
 jobs:
   build:
-    runs-on: ubuntu-latest # native amd64
+    runs-on: ubuntu-latest # native amd64 (CCE nodes are x86)
     permissions:
       contents: write # create the GitHub Release on tags
-      id-token: write # AWS OIDC (assume the ECR push role)
     steps:
       - uses: actions/checkout@v4
 
@@ -43,30 +37,33 @@ jobs:
         working-directory: controller
         run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o audit-resync .
 
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Log in to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Build & push image (FROM scratch — no Docker Hub)
+      - name: Build image (FROM scratch, into local daemon)
         working-directory: controller
+        run: docker build -f Dockerfile.ci -t local-build:current .
+
+      - name: Install skopeo
+        run: sudo apt-get update -qq && sudo apt-get install -y skopeo
+
+      - name: Push to SWR
+        env:
+          SWR_REGISTRY: ${{ secrets.SWR_REGISTRY }}
+          SWR_REPOSITORY: ${{ secrets.SWR_REPOSITORY }}
+          SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
+          SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
         run: |
           set -euo pipefail
-          IMAGE="${ECR_REPO}"
-          TAGS=("$IMAGE:sha-${GITHUB_SHA::12}")
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
-            TAGS+=("$IMAGE:${GITHUB_REF_NAME}" "$IMAGE:latest")
+            DESTS=("$GITHUB_REF_NAME" latest "sha-${GITHUB_SHA::12}")
           else
-            TAGS+=("$IMAGE:edge")
+            DESTS=(edge "sha-${GITHUB_SHA::12}")
           fi
-          args=(); for t in "${TAGS[@]}"; do args+=(-t "$t"); done
-          docker build -f Dockerfile.ci "${args[@]}" .
-          for t in "${TAGS[@]}"; do docker push "$t"; done
-          echo "pushed: ${TAGS[*]}"
+          for DEST in "${DESTS[@]}"; do
+            skopeo copy --format v2s2 \
+              --dest-creds "${SWR_USERNAME}:${SWR_PASSWORD}" \
+              docker-daemon:local-build:current \
+              "docker://${SWR_REGISTRY}/${SWR_REPOSITORY}:${DEST}"
+            echo "pushed ${SWR_REGISTRY}/${SWR_REPOSITORY}:${DEST}"
+          done
 
       - name: Cut GitHub Release
         if: github.ref_type == 'tag'

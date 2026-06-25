@@ -90,9 +90,9 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: audit-resync
-          # Built + pushed to ECR by .github/workflows/docker-build.yml (OIDC).
-          # Same-account ECR: EKS nodes pull via their node role — no imagePullSecret.
-          image: 865626945255.dkr.ecr.ap-southeast-5.amazonaws.com/scicom/openbao-hook:v0.1.0
+          # Built + pushed to SWR by .github/workflows/docker-build.yml.
+          # CCE pulls from same-account SWR without an imagePullSecret.
+          image: swr.my-kualalumpur-1.alphaedge.tmone.com.my/ucc-devl/openbao-hook:v0.1.0
           imagePullPolicy: IfNotPresent
           ports: [{ containerPort: 9000, name: http }]
           env:
