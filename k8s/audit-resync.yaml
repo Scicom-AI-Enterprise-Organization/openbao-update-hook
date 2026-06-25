@@ -90,10 +90,9 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: audit-resync
-          # Built + pushed to GHCR by .github/workflows/docker-build.yml.
-          # NOTE: GHCR packages are private by default — the cluster needs an
-          # imagePullSecret (or make the package public) to pull this.
-          image: ghcr.io/scicom-ai-enterprise-organization/openbao-update-hook:latest
+          # Built + pushed to ECR by .github/workflows/docker-build.yml (OIDC).
+          # Same-account ECR: EKS nodes pull via their node role — no imagePullSecret.
+          image: 865626945255.dkr.ecr.ap-southeast-5.amazonaws.com/scicom/openbao-hook:v0.1.0
           imagePullPolicy: IfNotPresent
           ports: [{ containerPort: 9000, name: http }]
           env:

@@ -1,7 +1,8 @@
 name: build-image
 
 # Native amd64 build, no QEMU, no Docker Hub pulls.
-# Compile with setup-go (Go from go.dev), package FROM scratch, push to GHCR.
+# Compile with setup-go (Go from go.dev), package FROM scratch, push to ECR.
+# Auth to AWS is keyless via GitHub OIDC assuming the ECR push role.
 #
 # Tagging:
 #   push to main      -> :edge, :sha-<commit>
@@ -19,12 +20,17 @@ on:
     tags: ["v*.*.*"]
   workflow_dispatch: {}
 
+env:
+  AWS_REGION: ap-southeast-5
+  ECR_REPO: 865626945255.dkr.ecr.ap-southeast-5.amazonaws.com/scicom/openbao-hook
+  ROLE_ARN: arn:aws:iam::865626945255:role/Scicom-openbao-hook-ECRAccessRole
+
 jobs:
   build:
     runs-on: ubuntu-latest # native amd64
     permissions:
       contents: write # create the GitHub Release on tags
-      packages: write # push to GHCR
+      id-token: write # AWS OIDC (assume the ECR push role)
     steps:
       - uses: actions/checkout@v4
 
@@ -37,14 +43,20 @@ jobs:
         working-directory: controller
         run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o audit-resync .
 
-      - name: Log in to GHCR
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build & push image (FROM scratch — no Docker Hub)
         working-directory: controller
         run: |
           set -euo pipefail
-          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"   # GHCR requires lowercase
+          IMAGE="${ECR_REPO}"
           TAGS=("$IMAGE:sha-${GITHUB_SHA::12}")
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
             TAGS+=("$IMAGE:${GITHUB_REF_NAME}" "$IMAGE:latest")

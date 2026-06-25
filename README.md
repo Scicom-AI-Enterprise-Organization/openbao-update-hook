@@ -69,11 +69,12 @@ The local container can't reach the Teleport-fronted cluster, so it runs
 
 ## Production runbook (gated)
 
-1. **Build + push** the image to a registry the cluster can pull:
-   ```bash
-   docker build -t <registry>/audit-resync:1 ./controller && docker push <registry>/audit-resync:1
-   ```
-   Set that image in `k8s/audit-resync.yaml`.
+1. **Image** is built + pushed to ECR automatically by the GitHub Actions
+   workflow (keyless via OIDC assuming `Scicom-openbao-hook-ECRAccessRole`):
+   `865626945255.dkr.ecr.ap-southeast-5.amazonaws.com/scicom/openbao-hook`.
+   Cut a release tag (`git tag vX.Y.Z && git push origin vX.Y.Z`) and the
+   workflow publishes `:vX.Y.Z`, `:latest`, `:sha-…`. Same-account EKS nodes pull
+   via their node role — no imagePullSecret. The manifest is pinned to `:v0.1.0`.
 2. **Deploy the controller first** and wait until Ready (2 replicas):
    ```bash
    kubectl apply -f k8s/audit-resync.yaml
