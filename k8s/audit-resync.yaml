@@ -1,0 +1,140 @@
+# audit-resync controller — deploy alongside the in-cluster OpenBao.
+#
+# Blast radius is enforced in TWO layers:
+#   1. App allowlist: ALLOW_NAMESPACES=dummyapp (others -> dry-run log only)
+#   2. RBAC: resolution (list externalsecrets) is cluster-wide read-only, but
+#      MUTATION (patch ES / delete Secret) is granted ONLY in namespace dummyapp.
+#   Plus DRY_RUN=true to start — flip to "false" only when you're ready.
+#
+# Rollout order matters (OpenBao audit is fail-closed at boot):
+#   1. kubectl apply -f k8s/audit-resync.yaml   (wait for pods Ready)
+#   2. add the audit stanza to OpenBao config + restart  (see openbao-audit-snippet.hcl)
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: audit-resync
+  namespace: openbao
+---
+# Cluster-wide READ-ONLY: needed to resolve any OpenBao key -> ExternalSecret.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: audit-resync-resolver
+rules:
+  - apiGroups: ["external-secrets.io"]
+    resources: ["externalsecrets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: audit-resync-resolver
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: audit-resync-resolver
+subjects:
+  - kind: ServiceAccount
+    name: audit-resync
+    namespace: openbao
+---
+# MUTATION rights — scoped to the dummyapp namespace ONLY (the test blast radius).
+# To widen later, copy this Role + RoleBinding into each target namespace
+# (or promote to a ClusterRole once you trust it).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: audit-resync-actor
+  namespace: dummyapp
+rules:
+  - apiGroups: ["external-secrets.io"]
+    resources: ["externalsecrets"]
+    verbs: ["get", "patch"] # force-sync action
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "delete"] # delete action
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: audit-resync-actor
+  namespace: dummyapp
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: audit-resync-actor
+subjects:
+  - kind: ServiceAccount
+    name: audit-resync
+    namespace: openbao
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audit-resync
+  namespace: openbao
+  labels: { app: audit-resync }
+spec:
+  replicas: 2 # HA: controller must be up whenever OpenBao boots (fail-closed audit)
+  selector:
+    matchLabels: { app: audit-resync }
+  template:
+    metadata:
+      labels: { app: audit-resync }
+    spec:
+      serviceAccountName: audit-resync
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: audit-resync
+          # Built + pushed to GHCR by .github/workflows/docker-build.yml.
+          # NOTE: GHCR packages are private by default — the cluster needs an
+          # imagePullSecret (or make the package public) to pull this.
+          image: ghcr.io/scicom-ai-enterprise-organization/openbao-update-hook:latest
+          imagePullPolicy: IfNotPresent
+          ports: [{ containerPort: 9000, name: http }]
+          env:
+            - { name: LISTEN_ADDR, value: ":9000" }
+            - { name: ACTION, value: "force-sync" } # force-sync (recommended) | delete
+            - { name: DRY_RUN, value: "true" } # flip to "false" for the real dummyapp test
+            - { name: ALLOW_NAMESPACES, value: "dummyapp" }
+            - { name: STORE_NAME, value: "openbao" }
+            - { name: ESO_API_VERSION, value: "v1" }
+            - { name: DEBOUNCE, value: "2s" }
+            - { name: ES_CACHE_TTL, value: "15s" }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: "25m", memory: "32Mi" }
+            limits: { cpu: "250m", memory: "128Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: audit-resync
+  namespace: openbao
+spec:
+  selector: { app: audit-resync }
+  ports:
+    - { name: http, port: 9000, targetPort: http }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: audit-resync
+  namespace: openbao
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: audit-resync }

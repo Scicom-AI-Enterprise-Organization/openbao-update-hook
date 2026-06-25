@@ -1,0 +1,59 @@
+services:
+  openbao:
+    image: openbao/openbao:latest
+    container_name: openbao
+    ports:
+      - "8200:8200"
+    environment:
+      # Fixed root token so you don't have to scrape it from the logs.
+      BAO_DEV_ROOT_TOKEN_ID: root
+      # Listen on all interfaces inside the container so the host port mapping works.
+      BAO_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+      # Used by the `bao` CLI inside the container (e.g. healthcheck).
+      BAO_ADDR: http://127.0.0.1:8200
+    cap_add:
+      # Lets OpenBao mlock memory (no-op in dev mode, but harmless and future-proof).
+      - IPC_LOCK
+    volumes:
+      # Declarative audit device config (audit devices can't be enabled via API).
+      - ./config:/openbao/config:ro
+    # The image entrypoint auto-loads everything under /openbao/config, so no
+    # explicit -config flag is needed (passing one double-loads the file).
+    command: server -dev
+    healthcheck:
+      test: ["CMD", "bao", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+    depends_on:
+      # OpenBao's http audit device runs a test POST at boot; if the receiver is
+      # down it returns non-2xx and OpenBao crash-loops. Wait for it to be healthy.
+      controller:
+        condition: service_healthy
+
+  # audit-resync controller (Go, stdlib only). Locally it's the dev harness:
+  # receives audit events from the dev OpenBao, filters + derives the ESO key.
+  # DRY_RUN=true here because this container can't reach the Teleport-fronted
+  # cluster; real k8s actions happen when deployed in-cluster (see ./k8s).
+  controller:
+    build: ./controller
+    container_name: controller
+    ports:
+      - "9000:9000"
+    environment:
+      LISTEN_ADDR: ":9000"
+      ACTION: "force-sync"      # force-sync (recommended) | delete
+      DRY_RUN: "true"           # local: never mutate
+      ALLOW_NAMESPACES: "dummyapp"
+      STORE_NAME: "openbao"
+      DEBOUNCE: "2s"
+      ES_CACHE_TTL: "15s"
+    healthcheck:
+      test: ["CMD", "/audit-resync", "--healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 2s
+    restart: unless-stopped

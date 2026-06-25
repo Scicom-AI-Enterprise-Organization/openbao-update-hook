@@ -1,0 +1,14 @@
+# superseded by controller/ (kept locally as a dev reference, not part of the repo)
+webhook/
+
+# local build artifacts
+controller/audit-resync
+*.test
+
+# logs / os cruft
+*.log
+.DS_Store
+
+# editor
+.idea/
+.vscode/
